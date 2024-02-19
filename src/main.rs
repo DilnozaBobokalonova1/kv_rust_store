@@ -6,15 +6,41 @@ use lru::LruCache;
 
 const MAX_CACHE_ENTRIES: usize = 1000;
 
-/* Records the position and length of an entry in the Log File. */
+/**
+ * Represents the position and length of an entry within the log file of the KeyValueStore.
+ * This struct is used to quickly locate and read entries from the log file without scanning
+ * the entire file, improving access speed for read operations.
+ *
+ * # Fields
+ * - `pos`: The position (offset) in bytes from the start of the log file to the beginning
+ *   of the entry. This allows direct seeking to the entry in the log file.
+ * - `len`: The length of the entry in bytes. This information is used to read the exact
+ *   amount of data from the log file for a particular entry.
+ *
+ * Note: LogEntry structs are stored in the KeyValueStore's index and are crucial for efficient
+ * data retrieval, especially in a system with a large number of key-value pairs.
+ */
 struct LogEntry {
     pos: u64,
     len: u64,
 }
 
 /**
- * Use of an in-memory hash map (index) to track the position & length of 
- * each entry in the log file, allowing for fast lookups.
+ * Implements a key-value store with an append-only log file for persistence and an in-memory
+ * index for quick data access. Features include:
+ * 
+ * #Fields
+ * - `index`: HashMap mapping keys to LogEntry for fast lookups, avoiding full file scans.
+ * - `log`: File handle for the log file, supporting sequential writes.
+ * - `log_path`: Path to the log file, used for file operations and compaction.
+ * - `cache`: Mutex-protected LruCache caching key-value pairs, improving read performance.
+ *
+ * Functionality:
+ * - Asynchronous CRUD operations for key-value pairs.
+ * - Log compaction to reduce storage usage by removing old or deleted entries.
+ * - In-memory caching to reduce disk I/O for frequently accessed items.
+ *
+ * Designed for the need of efficient read/write access and persistence with a simple key-value data model.
  */
 struct KeyValueStore {
     //enables quick lookup of values by key without needing to re-read the file
@@ -241,6 +267,30 @@ impl KeyValueStore {
         Ok(None)
     }
 
+    /**
+     * Deletes a key-value pair from the KeyValue store. If the key exists, it marks the entry
+     * as deleted in the log file by appending a "deleted" marker and updates the cache to reflect
+     * this change by setting the value to None. This ensures consistency between the log file, 
+     * the index, and the cache.
+     * 
+     * # Parameters
+     * - `key`: A string slice (`&str`) representing the key of the entry to be deleted.
+     * 
+     * # Behavior
+     * - Checks the in-memory index for the key and removes it if present, indicating that the key
+     *   is marked for deletion in the log file by appending a "deleted" entry.
+     * - Updates the cache by setting the associated value to None, ensuring subsequent `get` calls
+     *   for this key will reflect its deleted status until the log is compacted.
+     * 
+     * # Returns
+     * - `Ok(())` indicating successful deletion or that the key was not found, with the cache updated
+     *   accordingly.
+     * - `Err(io::Error)` if an error occurs during the deletion process, such as issues appending the
+     *   "deleted" marker to the log file.
+     * 
+     * Note: Actual removal from the log file occurs during the compaction process. This method
+     * primarily ensures logical deletion by marking the entry as deleted and updating the cache.
+     */
     async fn delete(&mut self, key: &str) -> io::Result<()> {
         if self.index.remove(key).is_some() {
             //appending a new "deleted" marker for the key
@@ -253,8 +303,24 @@ impl KeyValueStore {
     }
 
     /**
-     * Compact function can be called on a scheduled basis in order to write
-     * to a new copy of store all the non-deleted values.
+     * Performs compaction of the KeyValue store's log file, creating a new log that excludes deleted
+     * entries and old versions of updated entries. This method improves storage efficiency and
+     * access speed by removing unnecessary data.
+     *
+     * # Behavior
+     * - Generates a temporary file to write the compacted entries.
+     * - Iterates over the current index to identify non-deleted, latest version entries.
+     * - Writes these entries to the temporary file, simultaneously building a new index.
+     * - Replaces the old log file with the compacted file and updates the in-memory index.
+     *
+     * # Returns
+     * - `Ok(())` on successful compaction and log replacement.
+     * - `Err(io::Error)` if an error occurs at any stage of the process, including file operations
+     *   and index update failures.
+     *
+     * Note: This operation is critical for maintaining the performance and efficiency of the
+     * KeyValue store, especially after numerous set and delete operations. Compact function 
+     * can be scheduled periodically based on storage constraints and the needed usage pattern.
      */
     async fn compact(&mut self) -> io::Result<()> {
         // Temporary file path for the new compacted log
