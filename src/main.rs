@@ -98,6 +98,11 @@ impl KeyValueStore {
         Ok(())
     }
 
+    /**
+     * The GET utilizes the index to jump directly to the last known position of a key-value 
+     * pair, which should ensure it retrieves the latest value for a given key even in cases
+     * we have multiple entries (lines) for the same key.
+     */
     async fn get(&mut self, key: &str) -> io::Result<Option<String>> {
         //check the index hashmap for key before calling log
         if let Some(entry) = self.index.get(key) {
@@ -130,6 +135,7 @@ impl KeyValueStore {
 
     async fn delete(&mut self, key: &str) -> io::Result<()> {
         if self.index.remove(key).is_some() {
+            //appending a new "deleted" marker for the key
             self.set(key.to_string(), "deleted".to_string()).await?;
         }
         Ok(())
@@ -145,6 +151,7 @@ impl KeyValueStore {
         let mut temp_file: File = OpenOptions::new()
             .create(true)
             .write(true)
+            .append(true)
             .open(&temp_path)
             .await?;
 
@@ -159,8 +166,8 @@ impl KeyValueStore {
         for key in keys {
             if let Some(value) = self.get(&key).await? {
                 // Assuming `get` fetches the latest non-deleted value for the key
-                if value != "deleted\n" { // Check if not marked as deleted
-                    let new_line = format!("{}={}", key, value);
+                if value != "deleted" { // Check if not marked as deleted
+                    let new_line = format!("{}={}\n", key, value);
                     temp_file.write_all(new_line.as_bytes()).await?;
                     // Update the new index with the new position and length
                     new_index.insert(key.clone(), LogEntry { pos: new_pos, len: new_line.len() as u64 });
@@ -195,8 +202,15 @@ async fn main() -> io::Result<()> {
 
     store.set("key1".to_string(), "value1".to_string()).await?;
     println!("{:?}", store.get("key1").await?);
+    store.set("key2".to_string(), "value2".to_string()).await?;
+    println!("{:?}", store.get("key2").await?);
+    store.set("key3".to_string(), "value3".to_string()).await?;
+    println!("{:?}", store.get("key3").await?);
+    store.set("key4".to_string(), "value4".to_string()).await?;
+    println!("{:?}", store.get("key4").await?);
     store.delete("key1").await?;
     println!("{:?}", store.get("key1").await?);
 
+    store.compact().await?;
     Ok(())
 }
