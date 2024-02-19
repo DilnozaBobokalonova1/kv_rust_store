@@ -65,11 +65,33 @@ impl KeyValueStore {
 
     /**
      * Upon initialization, async call to load reads the log file and (re)builds the index,
-     * ensuring that the hash indices are up to date with the log content.
+     * ensuring that the hash indices are up to date with the log content. Reads the entire
+     * log file at the start of the KeyValueStore instance and (re)builds the index.
+     * It is responsible for parsing the log file line by line to extract key-value pairs,
+     * where each entry is expected to be in the format "key=value\n". It updates the in-memory index
+     * with the position and length of each entry, allowing for fast lookups without needing to
+     * re-read the file.
      * 
-     * Note: since we do not have guaranteed UTF-8 sequences, we shall be using the utf8_lossy
-     * method for to_string(), enabling the replacement of invalid UTF-8 chars into �. 
+     * # Behavior
+     * - The function seeks to the beginning of the log file and reads its content into a buffer.
+     * - It then iterates over the buffer, identifying each line (entry) by looking for newline
+     *   characters and splits each line into key and value based on the '=' character.
+     * - For each valid key-value pair found, it records the position and length of the entry in the
+     *   log file and updates the index with this information.
+     * 
+     * # Error Handling
+     * - If the log file cannot be read (e.g., due to I/O errors), an `io::Error` is returned.
+     * 
+     * # Returns
+     * - `Ok(())` on successful parsing and indexing of the log file.
+     * - `Err(io::Error)` if an error occurs while reading the file or processing its contents.
+     * 
+     * Note: This function assumes that the log file's format is correct and does not perform
+     * extensive validation of each entry. Malformed entries may result in incomplete or incorrect
+     * indexing. However, since we do not have guaranteed UTF-8 sequences, it uses the utf8_lossy
+     * method for to_string() conversion, enabling the replacement of invalid UTF-8 chars into �. 
      */
+
     async fn load(&mut self) -> io::Result<()> {
         self.log.seek(io::SeekFrom::Start(0)).await?;
         let mut buffer = Vec::new();
@@ -96,6 +118,38 @@ impl KeyValueStore {
         Ok(())
     }
 
+    
+    /**
+     * Writes a new key-value pair to the log file and updates the in-memory index and cache.
+     * This function appends the new entry at the end of the log file, ensuring that all writes
+     * are sequential for efficiency. The in-memory index is then updated with the position and
+     * length of the new entry, allowing for quick future lookups. Additionally, the key-value
+     * pair is stored in the LRU cache to speed up read operations.
+     * 
+     * # Parameters
+     * - `key`: A `String` representing the key of the entry to be added or updated in the log file.
+     * - `value`: A `String` representing the value associated with the key.
+     * 
+     * # Behavior
+     * - The function seeks to the end of the log file to ensure that the new entry is appended,
+     *   preserving the order of writes.
+     * - A new log entry is formatted as "key=value\n" and written to the file.
+     * - The in-memory index is updated with the new entry's position and length, keyed by the entry's key.
+     * - The key-value pair is also inserted into the cache, with any existing entry for the key being
+     *   overwritten to reflect the most current value.
+     * 
+     * # Error Handling
+     * - If there is an error while seeking to the end of the file, writing the entry, or updating
+     *   the index or cache, an `io::Error` is returned.
+     * 
+     * # Returns
+     * - `Ok(())` if the entry is successfully written to the log file, and the index and cache are updated.
+     * - `Err(io::Error)` if an error occurs during any part of the process.
+     * 
+     * Note: This function ensures that the KeyValueStore remains consistent by atomically
+     * updating the log file, index, and cache. However, callers should handle possible I/O errors,
+     * especially when dealing with file system limitations or write failures.
+     */
     async fn set(&mut self, key: String, value: String) -> io::Result<()> {
         //move the pointer in the log to the end of the latest log entry
         let pos = self.log.seek(io::SeekFrom::End(0)).await?;
@@ -111,10 +165,41 @@ impl KeyValueStore {
     }
 
     /**
-     * The GET utilizes the index to jump directly to the last known position of a key-value 
+     * The GET utilizes an in-memory cache and checks it for the value, and if not found,
+     * it uses the index to jump directly to the last known position of a key-value 
      * pair, which should ensure it retrieves the latest value for a given key even in cases
      * we have multiple entries (lines) for the same key.
+     * 
+     * # Parameters
+     * - `key`: A string slice (`&str`) representing the key for which the value is being retrieved.
+     * 
+     * # Behavior
+     * - The cache is checked first to minimize disk I/O and improve retrieval speed. If the value
+     *   is present in the cache, it is returned immediately.
+     * - If the value is not found in the cache, the function then looks up the key in the index
+     *   to find the position and length of the log entry.
+     * - The log file is read at the specified position to extract the value. This operation involves
+     *   seeking to the correct position in the file and reading the specified number of bytes into a buffer.
+     * - The key-value pair is parsed from the buffer, and the value is cached before being returned.
+     * 
+     * # Error Handling
+     * - If the key is not found in either the cache or the index, `Ok(None)` is returned, indicating
+     *   that there is no value associated with the key.
+     * - If any I/O errors occur while reading from the log file, or if the log entry format is invalid,
+     *   an `Err(io::Error)` is returned with the appropriate error.
+     * 
+     * # Returns
+     * - `Ok(Some(String))` if the value is found, containing the value associated with the key.
+     * - `Ok(None)` if the key is not found in the cache or the index.
+     * - `Err(io::Error)` if an error occurs during the operation.
+     * 
+     * Note: This function emphasizes efficiency by utilizing an LRU cache for frequently accessed values.
+     * However, it incurs overhead from locking the cache for each access, which is a trade-off for
+     * maintaining cache consistency in asynchronous environments. To minimize this overhead, we can
+     * fine-tune the cache size and/or explore lock-free caching mechanisms if the performance impact
+     * becomes significant.
      */
+
     async fn get(&mut self, key: &str) -> io::Result<Option<String>> {
         //first, lets check the cache for the value (note, this might cause overhead due to locking)
         let mut cache_lock = self.cache.lock().await;
