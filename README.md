@@ -13,9 +13,7 @@ This project implements a simple yet efficient key-value store in Rust, leveragi
 
 ## Design Considerations
 
-- **SSD Wear Minimization:** Recognizing the wear-out mechanism of SSDs, the store checks for existing data before writing to the disk, reducing unnecessary write operations.
-- **Batch Writes:** Facilitates batch writes, leveraging the efficiency of SSDs in handling larger, less frequent writes compared to multiple small, frequent ones. This strategy extends the SSD's lifespan and improves write efficiency.
-- **Write Buffering:** Offers optional write buffering in RAM, allowing aggregation and optimization of write operations before they are committed to disk. This approach ensures efficient use of write cycles, writing only final or necessary data to the SSD.
+- **Batch Writes:** Gives option for batch writes and deletes, leveraging the efficiency of SSDs in handling larger, less frequent writes compared to multiple small, frequent ones. This strategy extends the SSD's lifespan and improves write efficiency.
 
 ## Implementation Details
 
@@ -24,7 +22,7 @@ This project implements a simple yet efficient key-value store in Rust, leveragi
 
 ## Asynchronous Operations
 
-All read, write, delete, and compaction operations are asynchronous, ensuring the system remains responsive and scalable under load.
+All read, write, delete, batch write/delete, and compaction operations are asynchronous, ensuring the system remains responsive and scalable under load. Although, note that we are assuming a single node in this design. With the addition of more nodes, might need to add a Mutex wrapper around the log.
 
 ## Usage
 
@@ -35,7 +33,7 @@ The store is initialized with a file path to the log file and supports asynchron
 - Implementing more sophisticated data validation and error handling for robustness.
 - Exploring additional caching strategies or lock-free mechanisms to further enhance performance.
 - Evaluating and integrating more advanced storage formats or indexing techniques for scalability.
-- Adding snapshot functionality since we operate on single node which is a single point of failure. Can run snapshot every day to ensure data is copied and saved in case of failure. Could look something like this:
+- Adding snapshot functionality since we operate on single node which is a single point of failure. Can run snapshot every day to ensure log data is copied into a separate file. Could look something like this:
 ```rust
 struct KeyValueStore {
     // Existing fields...
