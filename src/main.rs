@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+use lru::LruCache;
+
+const MAX_CACHE_ENTRIES: usize = 1000;
 
 /* Records the position and length of an entry in the Log File. */
 struct LogEntry {
@@ -18,6 +22,8 @@ struct KeyValueStore {
     log: File,
     //necessary for compaction
     log_path: String,
+    // Cache with async Mutex
+    cache: Mutex<LruCache<String, Option<String>>>
 }
 
 impl KeyValueStore {
@@ -51,6 +57,7 @@ impl KeyValueStore {
             index: HashMap::new(),
             log,
             log_path: file_path.to_string(),
+            cache: Mutex::new(LruCache::new(MAX_CACHE_ENTRIES)),
         };
         store.load().await?;
         Ok(store)
@@ -94,7 +101,12 @@ impl KeyValueStore {
         let pos = self.log.seek(io::SeekFrom::End(0)).await?;
         let entry = format!("{}={}\n", key, value);
         self.log.write_all(entry.as_bytes()).await?;
-        self.index.insert(key, LogEntry { pos, len: entry.len() as u64 });
+        self.index.insert(key.clone(), LogEntry { pos, len: entry.len() as u64 });
+
+        // Update the cache with the new value
+        let mut cache_lock = self.cache.lock().await;
+        cache_lock.put(key, Some(value));
+
         Ok(())
     }
 
@@ -104,7 +116,14 @@ impl KeyValueStore {
      * we have multiple entries (lines) for the same key.
      */
     async fn get(&mut self, key: &str) -> io::Result<Option<String>> {
-        //check the index hashmap for key before calling log
+        //first, lets check the cache for the value (note, this might cause overhead due to locking)
+        let mut cache_lock = self.cache.lock().await;
+        if let Some(value) = cache_lock.get(key) {
+            return Ok(value.clone());
+        }
+        drop(cache_lock); //release the lock before proceeding
+
+        //Now, since val is not in cache, check index hashmap for key before calling log and then cache the result
         if let Some(entry) = self.index.get(key) {
             let mut buffer = vec![0; entry.len as usize];
             //using entry.pos to move the pointer in memory to the exact location
@@ -128,6 +147,10 @@ impl KeyValueStore {
                 _ => String::from_utf8_lossy(key_value_pair[1]).to_string()
             };
 
+            //cache before returning the result
+            let mut cache_lock = self.cache.lock().await;
+            //automatic release of our cache lock when the lock guard goes out of scope
+            cache_lock.put(key.to_string(), Some(value.clone()));
             return Ok(Some(value))
         }
         Ok(None)
@@ -138,6 +161,9 @@ impl KeyValueStore {
             //appending a new "deleted" marker for the key
             self.set(key.to_string(), "deleted".to_string()).await?;
         }
+        // Reflect the change in the cache by setting the value to None for persistency
+        let mut cache_lock = self.cache.lock().await;
+        cache_lock.put(key.to_string(), None);
         Ok(())
     }
 
